@@ -1,0 +1,7 @@
+__pycache__/
+.vscode/
+builds/
+*.exe
+*.dll
+checkpoints/
+runs/
