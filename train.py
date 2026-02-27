@@ -65,7 +65,9 @@ def train(config: PPOConfig,
     #   避免多次实验的模型互相覆盖。
     # ------------------------------------------------------------------
     effective_run_name = run_name if run_name else "default"
-    # [Fix-1] 将 run_name 拼接到 checkpoint_dir 上，形成独立子目录
+    # [M-2 修复] 用 copy 避免修改原始 config
+    import copy
+    config = copy.copy(config)
     config.checkpoint_dir = os.path.join(config.checkpoint_dir, effective_run_name)
     print(f"[Train] 检查点目录: {config.checkpoint_dir}")
 
@@ -116,7 +118,13 @@ def train(config: PPOConfig,
                 current_episode_length += 1
                 logger.step(reward, done)
 
-                buffer.add(obs, action, reward, done, log_prob, value)
+                # [S-2 修复] 区分超时截断(truncation)和真正终止(termination)
+                # 超时时 done=True 但 interrupted=True，此时 Agent 仍有未来收益，
+                # GAE 应该用 Critic bootstrap 而不是强制 next_value=0。
+                # 因此存入 buffer 的 done 标志：真正终止=True，超时截断=False
+                terminated = done and not info.get("interrupted", False)
+                buffer.add(obs, action, reward, terminated, log_prob, value)
+
                 agent.global_step += 1
                 obs = next_obs
 
@@ -137,6 +145,15 @@ def train(config: PPOConfig,
             buffer.compute_gae(last_value=last_value)
 
             actor_loss, critic_loss, entropy = agent.update(buffer)
+
+            # [O-1 新增] 学习率线性衰减（PPO 标准 trick）
+            # 从 config.lr 线性下降到 0，防止训练后期策略震荡
+            progress = agent.global_step / config.total_timesteps
+            new_lr = config.lr * (1.0 - progress)
+            new_lr = max(new_lr, 1e-7)  # 最低不为 0
+            for param_group in agent.optimizer.param_groups:
+                param_group['lr'] = new_lr
+
 
             current_lr = agent.optimizer.param_groups[0]["lr"]
             logger.log_training(

@@ -207,7 +207,8 @@ class Actor(nn.Module):
         # 可学习的对数标准差（log_std）参数
         # 使用 log_std 而非 std 是为了保证 std > 0（exp 的值域为正数）
         # 初始化为 0 意味着初始 std = exp(0) = 1.0，动作探索充分
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        # [O-3 修复] 初始 std 从 1.0 降为 ~0.6，减少无效的边界采样
+        self.log_std = nn.Parameter(torch.ones(action_dim) * -0.5)
 
     def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -249,15 +250,14 @@ class Actor(nn.Module):
         # 构建独立高斯分布（每个动作维度独立）
         dist = Normal(mu, std)
 
-        # 从分布中采样动作（训练时带随机性，促进探索）
-        action = dist.sample()  # (batch, action_dim)
+        # 从分布中采样原始动作（未截断）
+        raw_action = dist.sample()  # (batch, action_dim)
 
-        # 夹到 [-1, 1]，防止极端值破坏 Unity 物理仿真
-        action = action.clamp(-1.0, 1.0)
+        # [M-1 修复] 先用未截断的原始动作计算 log_prob，保证概率计算准确
+        log_prob = dist.log_prob(raw_action).sum(dim=-1)
 
-        # 计算对数概率：sum over action dimensions（独立高斯的联合概率 = 边缘概率之积）
-        # log_prob.shape = (batch,)
-        log_prob = dist.log_prob(action).sum(dim=-1)
+        # 再截断到 [-1, 1]，发给 Unity 执行
+        action = raw_action.clamp(-1.0, 1.0)
 
         # 计算熵：sum over action dimensions，再求均值（标量）
         entropy = dist.entropy().sum(dim=-1)  # (batch,)

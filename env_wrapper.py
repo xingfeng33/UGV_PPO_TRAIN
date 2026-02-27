@@ -201,11 +201,17 @@ class UGVSearchEnv:
             reward   = float(terminal_steps.reward[0])
             done     = True
             info     = {"interrupted": bool(terminal_steps.interrupted[0])}
-        else:
+        elif len(decision_steps) > 0:
             next_obs = self._extract_obs(decision_steps)
             reward   = float(decision_steps.reward[0])
             done     = False
             info     = {}
+        else:
+            # [M-4 修复] 极端情况：两者都为空，返回上一次观测
+            next_obs = self._last_obs
+            reward   = 0.0
+            done     = False
+            info     = {"empty_steps": True}
 
         self._last_obs = next_obs
         return next_obs, reward, done, info

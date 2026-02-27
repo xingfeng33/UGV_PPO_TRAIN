@@ -66,6 +66,6 @@ class PPOConfig:
 
     save_interval: int = 25
     eval_interval: int = 10
-    eval_episodes: int = 5
+    eval_episodes: int = 20
     seed: int = 42
     device: str = "cuda"
