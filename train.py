@@ -111,20 +111,25 @@ def train(config: PPOConfig,
             buffer.reset()
 
             for step in range(config.rollout_steps):
+                # 1. Agent 采样动作（这里的 action 是原始的 raw_action，未被截断）
                 action, log_prob, value = agent.select_action(obs)
-                next_obs, reward, done, info = env.step(action)
+
+                # 2. [核心新增]：给 Unity 执行的动作必须截断到 [-1, 1] 之间！
+                env_action = np.clip(action, -1.0, 1.0)
+
+                # 3. 与环境交互（传入的是截断后的 env_action）
+                next_obs, reward, done, info = env.step(env_action)
 
                 current_episode_reward += reward
                 current_episode_length += 1
                 logger.step(reward, done)
 
-                # [S-2 修复] 区分超时截断(truncation)和真正终止(termination)
-                # 超时时 done=True 但 interrupted=True，此时 Agent 仍有未来收益，
-                # GAE 应该用 Critic bootstrap 而不是强制 next_value=0。
-                # 因此存入 buffer 的 done 标志：真正终止=True，超时截断=False
+                # 4. [保留之前的 S-2 修复]：区分超时截断和真正终止
                 terminated = done and not info.get("interrupted", False)
-                buffer.add(obs, action, reward, terminated, log_prob, value)
 
+                # 5. 存入 Buffer（注意：存入的是未截断的 action 和修正后的 terminated）
+                buffer.add(obs, action, reward, terminated, log_prob, value)
+                
                 agent.global_step += 1
                 obs = next_obs
 
@@ -138,22 +143,23 @@ def train(config: PPOConfig,
                     current_episode_reward    = 0.0
                     current_episode_length    = 0
                     obs = env.reset()
+            # -----------------------------------------------------------------
 
             with torch.no_grad():
                 obs_t      = torch.from_numpy(obs).unsqueeze(0).to(device)
                 last_value = agent.critic(obs_t).squeeze().cpu().item()
             buffer.compute_gae(last_value=last_value)
 
-            actor_loss, critic_loss, entropy = agent.update(buffer)
-
-            # [O-1 新增] 学习率线性衰减（PPO 标准 trick）
-            # 从 config.lr 线性下降到 0，防止训练后期策略震荡
+            # ------------------- 替换/添加这部分：学习率衰减 -------------------
+            # [保留之前的 O-1 修复] 学习率线性衰减
             progress = agent.global_step / config.total_timesteps
             new_lr = config.lr * (1.0 - progress)
-            new_lr = max(new_lr, 1e-7)  # 最低不为 0
+            new_lr = max(new_lr, 1e-7)  # 防止降到 0
             for param_group in agent.optimizer.param_groups:
                 param_group['lr'] = new_lr
 
+            actor_loss, critic_loss, entropy = agent.update(buffer)
+            # -----------------------------------------------------------------
 
             current_lr = agent.optimizer.param_groups[0]["lr"]
             logger.log_training(

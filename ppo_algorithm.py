@@ -20,7 +20,7 @@ import torch.optim as optim
 from typing import Tuple, Generator
 
 from config import PPOConfig
-from networks import Actor, Critic, MLPFeatureExtractor
+from networks import Actor, Critic, MLPFeatureExtractor, RunningMeanStd
 
 
 # =============================================================================
@@ -187,6 +187,7 @@ class PPOAgent:
     def __init__(self, config: PPOConfig, state_dim: int):
         self.config = config
         self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.obs_rms = RunningMeanStd(shape=(state_dim,)).to(self.device)
 
         print(f"[Agent] 使用计算设备: {self.device}")
 
@@ -233,20 +234,26 @@ class PPOAgent:
             value   : float  Critic 估计的状态价值（存入 buffer）
         """
         # numpy → tensor，增加 batch 维度：(state_dim,) → (1, state_dim)
-        obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
+        obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device).float()
+        # 训练模式下更新均值方差
+        if self.actor.training:
+            self.obs_rms.update(obs_t)
+        # 状态归一化
+        obs_norm = self.obs_rms(obs_t)
 
         # Actor 采样动作
-        action_t, log_prob_t, _ = self.actor.get_action(obs_t)
+        # 拿到原始动作 raw_action
+        raw_action_t, log_prob_t, _ = self.actor.get_action(obs_norm)
 
         # Critic 估计价值
-        value_t = self.critic(obs_t)  # (1, 1)
+        value_t = self.critic(obs_norm)  # (1, 1)
 
         # tensor → numpy，去除 batch 维度
-        action   = action_t.squeeze(0).cpu().numpy()    # (action_dim,)
-        log_prob = log_prob_t.squeeze(0).cpu().item()   # scalar
-        value    = value_t.squeeze().cpu().item()       # scalar
+        raw_action = raw_action_t.squeeze(0).cpu().numpy()
+        log_prob = log_prob_t.squeeze(0).cpu().item()
+        value    = value_t.squeeze().cpu().item()
 
-        return action, log_prob, value
+        return raw_action, log_prob, value
 
     def update(self, buffer: RolloutBuffer) -> Tuple[float, float, float]:
         """
@@ -267,11 +274,14 @@ class PPOAgent:
         for epoch in range(self.config.ppo_epochs):
             for batch in buffer.get_mini_batches():
                 states, actions, old_log_probs, advantages, returns = batch
+                # [核心新增]：更新网络时，把 Buffer 里的原始状态进行归一化
+                states_norm = self.obs_rms(states)
 
                 # ==========================================================
                 # 步骤 1: 重新评估动作（用当前策略 π_θ 对旧动作 a 计算 log_prob）
                 # ==========================================================
-                new_log_probs, entropy = self.actor.evaluate_actions(states, actions)
+                # 接下来传入 states_norm，且 actions 是没有被截断过的原始动作！
+                new_log_probs, entropy = self.actor.evaluate_actions(states_norm, actions)
                 # new_log_probs: (B,)  当前策略对旧动作的 log 概率
                 # entropy:       (B,)  当前策略的熵
 

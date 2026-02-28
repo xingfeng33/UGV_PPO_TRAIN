@@ -30,6 +30,35 @@ from typing import Tuple, List
 
 from config import PPOConfig
 
+# 1. 在 networks.py 顶部找个位置加入这个类（这是我的 PyTorch 归一化方案）
+class RunningMeanStd(nn.Module):
+    def __init__(self, shape, epsilon=1e-4):
+        super().__init__()
+        self.register_buffer("mean", torch.zeros(shape, dtype=torch.float32))
+        self.register_buffer("var", torch.ones(shape, dtype=torch.float32))
+        self.register_buffer("count", torch.tensor(epsilon, dtype=torch.float32))
+
+    def update(self, x: torch.Tensor):
+        with torch.no_grad():
+            batch_mean = x.mean(dim=0)
+            batch_var = x.var(dim=0, unbiased=False)
+            batch_count = x.shape[0]
+
+            delta = batch_mean - self.mean
+            tot_count = self.count + batch_count
+            new_mean = self.mean + delta * batch_count / tot_count
+            m_a = self.var * self.count
+            m_b = batch_var * batch_count
+            m2 = m_a + m_b + (delta ** 2) * self.count * batch_count / tot_count
+            new_var = m2 / tot_count
+
+            self.mean = new_mean
+            self.var = new_var
+            self.count = tot_count
+
+    def forward(self, x: torch.Tensor):
+        return (x - self.mean) / torch.sqrt(self.var + 1e-8)
+
 
 # =============================================================================
 # 特征提取器基类（定义接口规范）
@@ -225,11 +254,12 @@ class Actor(nn.Module):
 
         # 步骤2: 计算动作均值，用 tanh 压缩到 [-1, 1]
         # tanh 保证 Unity 动作空间约束（Unity 的连续动作默认在 [-1,1]）
-        mu = torch.tanh(self.mu_head(features))  # (batch, action_dim)
+        # 去掉 tanh! 直接输出! mu = torch.tanh(self.mu_head(features))  # (batch, action_dim)
 
         # 步骤3: 计算标准差
         # log_std 是可学习参数，将其 exp 后得到正数的 std
         # clamp 防止 std 过大或过小导致数值不稳定
+        mu = self.mu_head(features)  
         std = torch.exp(self.log_std.clamp(-20, 2))  # (action_dim,)
         # expand_as 将 std 广播到与 mu 相同的 shape，便于后续构建分布
         std = std.expand_as(mu)  # (batch, action_dim)
@@ -257,12 +287,12 @@ class Actor(nn.Module):
         log_prob = dist.log_prob(raw_action).sum(dim=-1)
 
         # 再截断到 [-1, 1]，发给 Unity 执行
-        action = raw_action.clamp(-1.0, 1.0)
+        # action = raw_action.clamp(-1.0, 1.0)
 
         # 计算熵：sum over action dimensions，再求均值（标量）
         entropy = dist.entropy().sum(dim=-1)  # (batch,)
 
-        return action, log_prob, entropy
+        return raw_action, log_prob, entropy
 
     def evaluate_actions(self, obs: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """

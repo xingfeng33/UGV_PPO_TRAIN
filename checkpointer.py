@@ -55,6 +55,8 @@ class Checkpointer:
             "critic_state_dict"   : agent.critic.state_dict(),
             "optimizer_state_dict": agent.optimizer.state_dict(),
             "config"        : self.config,  # 保存配置快照
+            # [新增] 保存状态归一化的历史记录（均值和方差）
+            "obs_rms_state_dict"  : agent.obs_rms.state_dict(),
         }
 
         # 定期保存（带序号）
@@ -104,7 +106,9 @@ class Checkpointer:
 
         # 恢复优化器状态（Adam 动量等）
         agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
+        # [新增] 恢复状态归一化的历史记录
+        if "obs_rms_state_dict" in checkpoint:
+            agent.obs_rms.load_state_dict(checkpoint["obs_rms_state_dict"])
         # 恢复训练进度
         agent.global_step   = checkpoint["global_step"]
         agent.episode_count = checkpoint["episode_count"]
