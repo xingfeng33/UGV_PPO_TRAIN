@@ -51,8 +51,9 @@ class PPOConfig:
     # ------------------------------------------------------------------
     # [网络结构参数]
     # ------------------------------------------------------------------
-    mlp_hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
-    feature_dim: int = 128
+    # 改后：扩大到 [512, 512, 256]，feature_dim 改为 256
+    mlp_hidden_dims: List[int] = field(default_factory=lambda: [512, 512, 256])
+    feature_dim: int = 256
 
     # ------------------------------------------------------------------
     # [日志与保存参数]
