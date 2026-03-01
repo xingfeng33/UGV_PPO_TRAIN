@@ -52,9 +52,12 @@ class RunningMeanStd(nn.Module):
             m2 = m_a + m_b + (delta ** 2) * self.count * batch_count / tot_count
             new_var = m2 / tot_count
 
-            self.mean = new_mean
-            self.var = new_var
-            self.count = tot_count
+            # self.mean = new_mean
+            # self.var = new_var
+            # self.count = tot_count
+            self.mean.data.copy_(new_mean)
+            self.var.data.copy_(new_var)
+            self.count.data.copy_(tot_count)
 
     def forward(self, x: torch.Tensor):
         return (x - self.mean) / torch.sqrt(self.var + 1e-8)

@@ -67,7 +67,7 @@ def train(config: PPOConfig,
     effective_run_name = run_name if run_name else "default"
     # [M-2 修复] 用 copy 避免修改原始 config
     import copy
-    config = copy.copy(config)
+    config = copy.deepcopy(config)
     config.checkpoint_dir = os.path.join(config.checkpoint_dir, effective_run_name)
     print(f"[Train] 检查点目录: {config.checkpoint_dir}")
 
@@ -146,8 +146,9 @@ def train(config: PPOConfig,
             # -----------------------------------------------------------------
 
             with torch.no_grad():
-                obs_t      = torch.from_numpy(obs).unsqueeze(0).to(device)
-                last_value = agent.critic(obs_t).squeeze().cpu().item()
+                obs_t      = torch.from_numpy(obs).unsqueeze(0).to(device).float()
+                obs_norm   = agent.obs_rms(obs_t)
+                last_value = agent.critic(obs_norm).squeeze().cpu().item()
             buffer.compute_gae(last_value=last_value)
 
             # ------------------- 替换/添加这部分：学习率衰减 -------------------

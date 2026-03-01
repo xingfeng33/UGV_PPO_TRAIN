@@ -98,7 +98,7 @@ class Checkpointer:
         device = torch.device(self.config.device if torch.cuda.is_available() else "cpu")
 
         # map_location 确保可以在不同设备间迁移（如训练用 GPU，加载用 CPU）
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
         # 恢复网络权重
         agent.actor.load_state_dict(checkpoint["actor_state_dict"])

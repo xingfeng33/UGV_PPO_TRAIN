@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from typing import Tuple, Generator
+import torch.nn.functional as F
 
 from config import PPOConfig
 from networks import Actor, Critic, MLPFeatureExtractor, RunningMeanStd
@@ -323,7 +324,7 @@ class PPOAgent:
                 # V_target_t = GAE 优势 + 旧价值估计（即 buffer.returns）
                 # 含义：让 Critic 学会准确预测期望回报
                 # ==========================================================
-                values_pred = self.critic(states).squeeze(-1)  # (B, 1) → (B,)
+                values_pred = self.critic(states_norm).squeeze(-1)  # (B, 1) → (B,)
                 critic_loss = F.mse_loss(values_pred, returns)
                 # 使用 F.mse_loss 而非手写，数值等价但更简洁
 
@@ -379,4 +380,3 @@ class PPOAgent:
 
 
 # 在 ppo_algorithm.py 顶部补充此 import（Python 标准做法）
-import torch.nn.functional as F

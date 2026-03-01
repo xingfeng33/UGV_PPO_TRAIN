@@ -80,8 +80,9 @@ def evaluate(agent: PPOAgent,
         last_reward  = 0.0
 
         while not done:
-            obs_t  = torch.from_numpy(obs).unsqueeze(0).to(device)
-            mu, _  = agent.actor(obs_t)
+            obs_t  = torch.from_numpy(obs).unsqueeze(0).to(device).float()
+            obs_norm = agent.obs_rms(obs_t)
+            mu, _ = agent.actor(obs_norm)
             action = mu.squeeze(0).cpu().numpy()
 
             obs, reward, done, info = env.step(action)

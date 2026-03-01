@@ -1,20 +1,27 @@
 # =============================================================================
-# play.py —— 可视化推理脚本（v2，同步修复成功判定逻辑）
+# play.py —— 可视化推理脚本（v3，修复观测归一化 + 动作截断）
 #
-# 修改记录 (v1 → v2):
-#   [Fix-1] 成功判定逻辑与 evaluator.py v3 保持一致：
-#           旧逻辑：is_success = ep_reward >= 5.0
-#                   → 奖励欺骗场景下（原地耗满1000步也得高分），会产生假阳性
-#           新逻辑：is_success = (not timed_out) AND (last_reward >= 5.0)
-#                   → timed_out 由 terminal_steps.interrupted 标志位确定
-#                   → last_reward 是终止时刻那一步的即时 reward（>5 说明碰到目标）
+# 修改记录 (v2 → v3):
+#   [Fix-4] 推理时加载 obs_rms（观测归一化器），并在每步推理前对观测做归一化。
+#           v2 的缺陷：
+#             训练时 Actor 接收的是经过 RunningMeanStd 归一化后的观测，
+#             但 play.py 推理时直接传入原始观测，输入分布不匹配，
+#             导致推理效果远低于训练表现。
+#           v3 的修复：
+#             从 checkpoint 中加载 obs_rms_state_dict，推理前做相同的归一化。
 #
-#   [Fix-2] 每局终端日志新增超时状态标记 [超时]，
-#           方便肉眼直接区分"真成功"与"耗满步数的假成功"
+#   [Fix-5] 推理时对动作做 clip 截断到 [-1, 1]。
+#           v2 的缺陷：
+#             由于 Actor 去掉了 tanh，mu 输出可能超出 [-1, 1]，
+#             train.py 中有 np.clip 但 play.py 没有，
+#             可能导致 Unity 收到非法动作值。
+#           v3 的修复：
+#             在发送动作前加入 np.clip(action, -1.0, 1.0)。
 #
+# 保留 v2 的所有修复：
+#   [Fix-1] 成功判定逻辑与 evaluator.py v3 保持一致
+#   [Fix-2] 每局终端日志新增超时状态标记
 #   [Fix-3] 总结报告的成功率统计同步使用新判定逻辑
-#
-# 所有其他接口（网络加载、观测提取、动作发送）保持不变。
 # =============================================================================
 
 import argparse
@@ -26,7 +33,7 @@ from mlagents_envs.environment import UnityEnvironment
 from mlagents_envs.base_env import ActionTuple
 from mlagents_envs.side_channel.engine_configuration_channel import EngineConfigurationChannel
 
-from networks import Actor, MLPFeatureExtractor
+from networks import Actor, MLPFeatureExtractor, RunningMeanStd  # [Fix-4] 新增导入 RunningMeanStd
 from config import PPOConfig
 
 
@@ -40,7 +47,7 @@ def play(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*62}")
-    print(f"  🎮 UGV PPO 可视化推理脚本（v2）")
+    print(f"  🎮 UGV PPO 可视化推理脚本（v3）")
     print(f"{'='*62}")
     print(f"  模型路径  : {args.checkpoint}")
     print(f"  测试局数  : {args.n_episodes}")
@@ -148,6 +155,20 @@ def play(args):
     actor.load_state_dict(checkpoint['actor_state_dict'])
     actor.eval()
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # [Fix-4] 加载观测归一化器 (RunningMeanStd)
+    #
+    # 训练时 Actor 看到的是经过 obs_rms 归一化后的观测，
+    # 推理时必须做相同的归一化，否则输入分布不匹配，动作输出会错乱。
+    # ─────────────────────────────────────────────────────────────────────────
+    obs_rms = RunningMeanStd(shape=(state_dim,)).to(device)
+    if 'obs_rms_state_dict' in checkpoint:
+        obs_rms.load_state_dict(checkpoint['obs_rms_state_dict'])
+        print(f"[Play] ✅ 观测归一化器 (obs_rms) 加载成功")
+    else:
+        print(f"[Play] ⚠️  检查点中无 obs_rms_state_dict，将使用默认值（未归一化）")
+        print(f"[Play]    如果该模型是用带归一化的代码训练的，推理效果可能不佳")
+
     total_params = sum(p.numel() for p in actor.parameters())
     print(f"[Play] ✅ Actor 加载成功！参数量: {total_params:,}")
     print(f"[Play]    推理模式：确定性策略（取动作均值 μ，无随机噪声）")
@@ -157,7 +178,7 @@ def play(args):
 
     # ─────────────────────────────────────────────────────────────────────────
     # 步骤 5：推理主循环
-    # ─────────────────────────────────────────────────��───────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     all_rewards   = []
     all_steps     = []
     # [Fix-3] 新增：分别记录每局的超时状态和最后一步奖励，供总结报告使用
@@ -183,15 +204,22 @@ def play(args):
         print(f"\n[Episode {ep+1:>2d}/{args.n_episodes}] ▶ 开始")
 
         while not done:
-            obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
+            obs_t = torch.from_numpy(obs).unsqueeze(0).to(device).float()
             # obs_t: (state_dim,) → (1, state_dim)，添加 batch 维
 
-            mu, _ = actor(obs_t)
+            # [Fix-4] 对观测进行归一化（与训练时一致）
+            obs_norm = obs_rms(obs_t)
+
+            mu, _ = actor(obs_norm)  # [Fix-4] 传入归一化后的观��
             # mu: (1, action_dim)，_ 是 std，推理时丢弃
 
             action = mu.squeeze(0).cpu().numpy()
             # action: (action_dim,) = (2,)
             # action[0]=Steer(-1左~+1右), action[1]=Motor(-1倒~+1前)
+
+            # [Fix-5] 截断动作到 [-1, 1]，与 train.py 保持一致
+            # 因为去掉了 tanh，mu 输出可能超出 [-1, 1]
+            action = np.clip(action, -1.0, 1.0)
 
             env.set_actions(
                 behavior_name,
@@ -210,23 +238,15 @@ def play(args):
 
                 # ─────────────────────────────────────────────────────────
                 # [Fix-1] 从 ML-Agents 官方标志位读取是否超时
-                #
-                # ML-Agents 规范：
-                #   terminal_steps.interrupted[0] == True
-                #   → 该 Episode 因达到 MaxStep 而被截断（超时）
-                #   terminal_steps.interrupted[0] == False
-                #   → 该 Episode 因触发 EndEpisode() 而正常结束（碰目标/碰墙）
-                #
-                # 这与 env_wrapper.py step() 中写入 info["interrupted"] 的逻辑完全一致
                 # ─────────────────────────────────────────────────────────
-                timed_out   = bool(terminal_steps.interrupted[0])  # [Fix-1]
-                last_reward = reward                                 # [Fix-1] 终止时刻的即时奖励
+                timed_out   = bool(terminal_steps.interrupted[0])
+                last_reward = reward
             else:
                 reward = float(decision_steps.reward[0])
                 obs = np.concatenate(
                     [o[0].flatten() for o in decision_steps.obs], axis=0
                 ).astype(np.float32)
-                last_reward = reward  # [Fix-1] 每步更新，done 时保留的就是终止奖励
+                last_reward = reward
 
             ep_reward += reward
             ep_steps  += 1
@@ -240,61 +260,48 @@ def play(args):
 
         # ─────────────────────────────────────────────────────────────────
         # [Fix-1] 双重条件成功判定（与 evaluator.py v3 完全一致）
-        #
-        # 旧逻辑（有假阳性）：
-        #   is_success = ep_reward >= 5.0
-        #   → 绝对值 shaping 奖励下，原地耗满1000步 ep_reward 也能超100，必然误判
-        #
-        # 新逻辑（可靠）：
-        #   条件1：not timed_out   → 不是超时，说明 MaxStep 前就有结束事件
-        #   条件2：last_reward >= 5.0 → 终止那一步的即时奖励 > 5
-        #          碰到目标：SetReward(10) → last_reward = 10 ≥ 5  ✅
-        #          碰到墙壁：SetReward(-1 or -10) → last_reward < 5  ❌
-        #          超时截断：条件1已排除  ❌
-        # ─────────────────────────────────────────────────────────────────
-        is_success = (not timed_out) and (last_reward >= 5.0)  # [Fix-1]
+        # ───────────────────��─────────────────────────────────────────────
+        is_success = (not timed_out) and (last_reward >= 5.0)
 
         all_rewards.append(ep_reward)
         all_steps.append(ep_steps)
-        all_timed_out.append(timed_out)      # [Fix-3]
-        all_last_reward.append(last_reward)  # [Fix-3]
+        all_timed_out.append(timed_out)
+        all_last_reward.append(last_reward)
 
-        # [Fix-2] 日志新增超时标记和最后一步奖励，肉眼可直接区分终止原因
+        # [Fix-2] 日志新增超时标记和最后一步奖励
         timeout_tag = "  ⏱️ [超时]" if timed_out else ""
         print(f"[Episode {ep+1:>2d}] "
               f"Steps={ep_steps:>4d} | "
               f"TotalReward={ep_reward:>7.3f} | "
-              f"LastR={last_reward:>+6.2f}"      # [Fix-2] 新增：终止奖励
-              f"{timeout_tag} | "                # [Fix-2] 新增：超时标记
+              f"LastR={last_reward:>+6.2f}"
+              f"{timeout_tag} | "
               f"{'✅ 成功' if is_success else '❌ 失败'}")
         print(f"{'─'*62}")
 
-    # ─────────────────────────────────────���───────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # 步骤 6：总结报告
-    # ──────────────────────────────────────────────────────────��──────────────
+    # ─────────────────────────────────────────────────────────────────────────
 
     # [Fix-3] 成功计数使用新判定逻辑
     success_n  = sum(
         (not to) and (lr >= 5.0)
         for to, lr in zip(all_timed_out, all_last_reward)
     )
-    timeout_n  = sum(all_timed_out)  # [Fix-3] 统计超时局数
+    timeout_n  = sum(all_timed_out)
 
     print(f"\n{'='*62}")
     print(f"  📊 测试总结（共 {args.n_episodes} 个 Episode）")
     print(f"{'='*62}")
     print(f"  平均奖励  : {np.mean(all_rewards):>7.3f}  ±  {np.std(all_rewards):.3f}")
     print(f"  平均步数  : {np.mean(all_steps):>7.1f}")
-    # [Fix-3] 区分"真实成功"和"超时局"，一目了然
     print(f"  真实成功率: {success_n}/{args.n_episodes}  "
           f"({success_n / args.n_episodes * 100:.0f}%)")
-    print(f"  超时局数  : {timeout_n}/{args.n_episodes}  "   # [Fix-3] 新增
+    print(f"  超时局数  : {timeout_n}/{args.n_episodes}  "
           f"({timeout_n / args.n_episodes * 100:.0f}%)")
     print(f"\n  各 Episode 明细:")
     for i, (r, s, to, lr) in enumerate(
         zip(all_rewards, all_steps, all_timed_out, all_last_reward)
     ):
-        # [Fix-3] 每行显示：累计奖励、步数、最后奖励、是否超时、是否成功
         is_ok   = (not to) and (lr >= 5.0)
         to_tag  = "[超时]" if to else "      "
         flag    = "✅" if is_ok else "❌"
@@ -312,7 +319,7 @@ def play(args):
 # =============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="UGV PPO 可视化推理脚本（v2）",
+        description="UGV PPO 可视化推理脚本（v3）",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
